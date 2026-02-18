@@ -1,4 +1,4 @@
-// bot.js - LPZX Bot v5 - Discord Lua Tools (APENAS APIS)
+// bot.js - LPZX Bot v5 - Discord Lua Tools
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -86,7 +86,7 @@ const SHORTEN_SERVICES = [
     }
 ];
 
-const MAX_UPLOADS_PER_DAY = 5;
+const MAX_UPLOADS_PER_DAY = 5; // SÓ PARA .UPLOAD
 const CACHE_TTL = 24 * 60 * 60 * 1000;
 
 const groq = new Groq({ apiKey: GROQ_API_KEY });
@@ -194,6 +194,7 @@ function saveCache() {
     fs.writeFileSync(path.join(CACHE_DIR, 'cache.json'), JSON.stringify(cacheArray, null, 2));
 }
 
+// FUNÇÃO DE LIMITE SÓ PARA .UPLOAD
 function checkUploadLimit(userId) {
     if (!userUploads[userId]) userUploads[userId] = [];
     const today = new Date().setHours(0,0,0,0);
@@ -377,21 +378,33 @@ function authenticateAPI(req, res, next) {
     next();
 }
 
+// ================= WEBSOCKET SERVER =================
 const wsClients = new Set();
 
 wss.on('connection', (ws) => {
+    console.log('[WSS] Novo cliente conectado');
     wsClients.add(ws);
     
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
+            
             if (data.type === 'ping') {
                 ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
             }
+            
+            if (data.type === 'credits_updated') {
+                // Atualizar cache local se necessário
+                console.log(`[WSS] Créditos atualizados para ${data.userId}: ${data.amount}`);
+            }
+            
         } catch (error) {}
     });
     
-    ws.on('close', () => wsClients.delete(ws));
+    ws.on('close', () => {
+        wsClients.delete(ws);
+        console.log('[WSS] Cliente desconectado');
+    });
 });
 
 function broadcastToClients(data) {
@@ -402,76 +415,7 @@ function broadcastToClients(data) {
     }
 }
 
-app.get('/auth/discord', passport.authenticate('discord'));
-
-app.get('/auth/discord/callback', 
-    passport.authenticate('discord', { failureRedirect: '/' }),
-    (req, res) => {
-        res.redirect('/?auth=success');
-    }
-);
-
-app.get('/auth/discord/verify', ensureAuthenticated, async (req, res) => {
-    try {
-        const response = await axios.get('https://discord.com/api/users/@me/guilds', {
-            headers: { 'Authorization': `Bearer ${req.user.accessToken}` }
-        });
-        
-        const inGuild = response.data.some(guild => guild.id === DISCORD_GUILD_ID);
-        
-        res.json({
-            authenticated: true,
-            inGuild: inGuild,
-            user: {
-                id: req.user.id,
-                username: req.user.username,
-                discriminator: req.user.discriminator,
-                avatar: req.user.avatar
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to verify' });
-    }
-});
-
-app.post('/auth/captcha/verify', async (req, res) => {
-    const { token } = req.body;
-    
-    if (!token) return res.status(400).json({ error: 'No token' });
-    
-    try {
-        const response = await axios.post('https://hcaptcha.com/siteverify', null, {
-            params: {
-                secret: HCAPTCHA_SECRET,
-                response: token
-            }
-        });
-        
-        if (response.data.success) {
-            res.json({ success: true });
-        } else {
-            res.status(400).json({ error: 'Invalid captcha' });
-        }
-    } catch (error) {
-        res.status(500).json({ error: 'Captcha verification failed' });
-    }
-});
-
-app.get('/auth/logout', (req, res) => {
-    req.logout(() => {
-        res.redirect('/');
-    });
-});
-
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'online', 
-        timestamp: Date.now(),
-        environment: ENVIRONMENT,
-        discord: client.isReady() ? 'connected' : 'disconnected'
-    });
-});
-
+// ================= ROTAS DO BOT =================
 app.get('/health', (req, res) => {
     res.json({
         status: 'online',
@@ -479,7 +423,8 @@ app.get('/health', (req, res) => {
         timestamp: Date.now(),
         uptime: process.uptime(),
         discord: client.isReady() ? 'connected' : 'disconnected',
-        environment: ENVIRONMENT
+        environment: ENVIRONMENT,
+        clients: wsClients.size
     });
 });
 
@@ -507,305 +452,49 @@ app.get('/api/stats', authenticateAPI, (req, res) => {
     });
 });
 
-app.get('/api/users', authenticateAPI, (req, res) => {
-    res.json({
-        total: stats.users_served.length,
-        users: stats.users_served
-    });
-});
-
-app.get('/api/commands', authenticateAPI, (req, res) => {
-    res.json(stats.commands_used);
-});
-
-app.get('/api/uploads/:userId', authenticateAPI, (req, res) => {
-    const userId = req.params.userId;
-    res.json(userUploads[userId] || []);
-});
-
-app.get('/api/cache', authenticateAPI, (req, res) => {
-    res.json({
-        size: cache.size,
-        keys: Array.from(cache.keys()),
-        ttl: CACHE_TTL / 1000 / 60 / 60 + ' hours'
-    });
-});
-
-app.post('/api/cache/clear', authenticateAPI, (req, res) => {
-    cache.clear();
-    saveCache();
-    res.json({ success: true });
-});
-
-app.get('/api/batch', authenticateAPI, (req, res) => {
-    res.json({
-        total: batchQueue.length,
-        jobs: batchQueue
-    });
-});
-
-app.post('/api/batch/clear', authenticateAPI, (req, res) => {
-    batchQueue = [];
-    saveBatchQueue();
-    res.json({ success: true });
-});
-
-app.post('/api/dump', authenticateAPI, async (req, res) => {
-    const { code, key } = req.body;
-    if (!code) return res.status(400).json({ error: 'No code' });
+// ================= WEBSOCKET CLIENT PARA O SITE =================
+let siteWs;
+function connectToSite() {
+    siteWs = new WebSocket(WSS_URL);
     
-    try {
-        const result = await executeDump(code, key);
-        res.json({ success: true, data: result });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/api/get', authenticateAPI, async (req, res) => {
-    const { url } = req.body;
-    if (!url) return res.status(400).json({ error: 'No URL' });
-    
-    try {
-        const result = await fetchWithWget(url);
-        res.json({ success: true, data: result.content });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/api/minify', authenticateAPI, async (req, res) => {
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ error: 'No code' });
-    
-    try {
-        const result = await executeMinify(code);
-        res.json({ success: true, data: result });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/api/decompiler', authenticateAPI, async (req, res) => {
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ error: 'No code' });
-    
-    try {
-        const result = await executeDecompiler(code);
-        res.json({ success: true, data: result });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/api/compress', authenticateAPI, async (req, res) => {
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ error: 'No code' });
-    
-    try {
-        const result = await executeCompress(code);
-        res.json({ success: true, data: result });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/api/renamer', authenticateAPI, async (req, res) => {
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ error: 'No code' });
-    
-    try {
-        const result = await executeRenamer(code);
-        res.json({ success: true, data: result });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/api/detect', authenticateAPI, async (req, res) => {
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ error: 'No code' });
-    
-    const detection = detectObfuscator(code);
-    res.json({ success: true, data: detection });
-});
-
-app.post('/api/batch/add', authenticateAPI, async (req, res) => {
-    const { type, data, userId } = req.body;
-    if (!type || !data) return res.status(400).json({ error: 'Missing data' });
-    
-    const jobId = crypto.randomBytes(16).toString('hex');
-    const job = {
-        id: jobId,
-        type,
-        data,
-        userId,
-        status: 'pending',
-        created: Date.now()
-    };
-    
-    batchQueue.push(job);
-    saveBatchQueue();
-    stats.total_batch_jobs++;
-    saveStats();
-    
-    broadcastToClients({ type: 'batch_added', job });
-    res.json({ success: true, jobId });
-});
-
-app.post('/api/batch/process/:jobId', authenticateAPI, async (req, res) => {
-    const jobId = req.params.jobId;
-    const jobIndex = batchQueue.findIndex(j => j.id === jobId);
-    if (jobIndex === -1) return res.status(404).json({ error: 'Job not found' });
-    
-    const job = batchQueue[jobIndex];
-    job.status = 'processing';
-    
-    try {
-        let result;
-        switch (job.type) {
-            case 'dump': result = await executeDump(job.data.code, job.data.key); break;
-            case 'minify': result = await executeMinify(job.data.code); break;
-            case 'decompiler': result = await executeDecompiler(job.data.code); break;
-            case 'compress': result = await executeCompress(job.data.code); break;
-            case 'renamer': result = await executeRenamer(job.data.code); break;
-            case 'detect': result = detectObfuscator(job.data.code); break;
-            default: throw new Error('Unknown job type');
-        }
+    siteWs.on('open', () => {
+        console.log('[WS] Conectado ao site');
         
-        job.status = 'completed';
-        job.result = result;
-        job.completed = Date.now();
-        
-        broadcastToClients({ type: 'batch_completed', job });
-        
-        setTimeout(() => {
-            const index = batchQueue.findIndex(j => j.id === jobId);
-            if (index !== -1) {
-                batchQueue.splice(index, 1);
-                saveBatchQueue();
-            }
-        }, 3600000);
-        
-        res.json({ success: true, result });
-    } catch (error) {
-        job.status = 'failed';
-        job.error = error.message;
-        job.completed = Date.now();
-        broadcastToClients({ type: 'batch_failed', job });
-        res.status(500).json({ error: error.message });
-    }
-    
-    saveBatchQueue();
-});
-
-app.get('/api/batch/:jobId', authenticateAPI, (req, res) => {
-    const job = batchQueue.find(j => j.id === req.params.jobId);
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-    res.json(job);
-});
-
-// ================= NOVAS APIS PARA O SITE =================
-
-// Verificar usuário
-app.post('/api/bot/check-user', async (req, res) => {
-    const { userId } = req.body;
-    if (!userId) return res.status(400).json({ error: 'Missing userId' });
-    
-    try {
-        const response = await axios.post(`${API_URL}/api/credits/check`, { userId }, {
-            headers: { 'Authorization': `Bearer ${API_TOKEN}` }
-        });
-        
-        res.json(response.data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Usar crédito
-app.post('/api/bot/use-credit', async (req, res) => {
-    const { userId, command, username } = req.body;
-    if (!userId) return res.status(400).json({ error: 'Missing userId' });
-    
-    try {
-        const response = await axios.post(`${API_URL}/api/credits/use`, 
-            { userId, command, username },
-            { headers: { 'Authorization': `Bearer ${API_TOKEN}` } }
-        );
-        
-        res.json(response.data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Definir créditos
-app.post('/api/bot/set-credits', async (req, res) => {
-    const { userId, amount, verified } = req.body;
-    if (!userId) return res.status(400).json({ error: 'Missing userId' });
-    
-    try {
-        const response = await axios.post(`${API_URL}/api/credits/set`, 
-            { userId, amount, verified },
-            { headers: { 'Authorization': `Bearer ${API_TOKEN}` } }
-        );
-        
-        res.json(response.data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Buscar estatísticas
-app.get('/api/bot/stats', async (req, res) => {
-    try {
-        const response = await axios.get(`${API_URL}/api/stats`, {
-            headers: { 'Authorization': `Bearer ${API_TOKEN}` }
-        });
-        
-        res.json(response.data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ================= WEBSOCKET CLIENT =================
-let ws;
-function connectWSS() {
-    ws = new WebSocket(WSS_URL);
-    
-    ws.on('open', () => {
-        console.log('[WSS] Conectado ao servidor');
-        
-        // Enviar identificação
-        ws.send(JSON.stringify({
+        // Registrar bot
+        siteWs.send(JSON.stringify({
             type: 'bot_register',
             botId: client.user?.id || 'unknown',
             botName: client.user?.tag || 'LPZ Bot'
         }));
     });
     
-    ws.on('message', (data) => {
+    siteWs.on('message', (data) => {
         try {
             const message = JSON.parse(data);
-            if (message.type === 'ping') {
-                ws.send(JSON.stringify({ type: 'pong' }));
+            
+            if (message.type === 'credits_updated') {
+                console.log(`[WS] Créditos atualizados via site: ${message.userId} = ${message.amount}`);
+                // Bot pode atualizar cache local se necessário
             }
+            
+            if (message.type === 'ping') {
+                siteWs.send(JSON.stringify({ type: 'pong' }));
+            }
+            
         } catch (e) {}
     });
     
-    ws.on('error', (err) => console.error('[WSS] Erro:', err.message));
+    siteWs.on('error', (err) => console.error('[WS] Erro:', err.message));
     
-    ws.on('close', () => {
-        console.log('[WSS] Desconectado, reconectando...');
-        setTimeout(connectWSS, 5000);
+    siteWs.on('close', () => {
+        console.log('[WS] Desconectado do site, reconectando...');
+        setTimeout(connectToSite, 5000);
     });
 }
 
 function sendToSite(type, data) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ 
+    if (siteWs && siteWs.readyState === WebSocket.OPEN) {
+        siteWs.send(JSON.stringify({ 
             type: 'bot_update', 
             updateType: type, 
             ...data 
@@ -814,6 +503,7 @@ function sendToSite(type, data) {
 }
 
 // ================= SISTEMA DE CRÉDITOS VIA API =================
+const userCreditsCache = new Map();
 
 async function checkUserVerified(userId) {
     try {
@@ -825,13 +515,28 @@ async function checkUserVerified(userId) {
             }
         );
         
+        const data = response.data;
+        
+        // Atualizar cache
+        userCreditsCache.set(userId, {
+            amount: data.amount,
+            verified: data.verified,
+            lastReset: data.lastReset
+        });
+        
         return {
-            verified: response.data.verified || false,
-            amount: response.data.amount || 0,
-            lastReset: response.data.lastReset || Date.now()
+            verified: data.verified || false,
+            amount: data.amount || 0,
+            lastReset: data.lastReset
         };
     } catch (error) {
         console.error(`[API] Erro ao verificar usuário ${userId}:`, error.message);
+        
+        // Usar cache se disponível
+        if (userCreditsCache.has(userId)) {
+            return userCreditsCache.get(userId);
+        }
+        
         return { verified: false, amount: 0, lastReset: Date.now() };
     }
 }
@@ -846,7 +551,18 @@ async function useUserCredit(userId, command, username) {
             }
         );
         
-        return response.data;
+        const data = response.data;
+        
+        if (data.success) {
+            // Atualizar cache
+            userCreditsCache.set(userId, {
+                amount: data.remaining,
+                verified: true,
+                lastReset: data.lastReset
+            });
+        }
+        
+        return data;
     } catch (error) {
         console.error(`[API] Erro ao usar crédito:`, error.message);
         return { 
@@ -867,6 +583,14 @@ async function setUserCredits(userId, amount, verified) {
             }
         );
         
+        if (response.data.success) {
+            userCreditsCache.set(userId, {
+                amount: amount,
+                verified: verified,
+                lastReset: Date.now()
+            });
+        }
+        
         return response.data;
     } catch (error) {
         console.error(`[API] Erro ao definir créditos:`, error.message);
@@ -875,7 +599,6 @@ async function setUserCredits(userId, amount, verified) {
 }
 
 // ================= HELPER FUNCTIONS =================
-
 async function shortenUrl(url) {
     for (const service of SHORTEN_SERVICES) {
         try {
@@ -1202,7 +925,7 @@ async function executeDecompiler(code) {
 async function executeCompress(code) {
     if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY not configured');
     const response = await groq.chat.completions.create({
-        model: 'mixtral-8x7b-32768',
+        model: 'groq/compound',
         messages: [
             { role: 'system', content: 'Compress Lua code removing spaces/comments. Return ONLY code.' },
             { role: 'user', content: code }
@@ -1215,7 +938,7 @@ async function executeCompress(code) {
 async function executeRenamer(code) {
     if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY not configured');
     const response = await groq.chat.completions.create({
-        model: 'mixtral-8x7b-32768',
+        model: 'groq/compound',
         messages: [
             { role: 'system', content: 'Rename obfuscated Lua variables to descriptive names. Return ONLY code.' },
             { role: 'user', content: code }
@@ -1226,7 +949,6 @@ async function executeRenamer(code) {
 }
 
 // ================= DISCORD HANDLERS =================
-
 async function handleDetect(message, args, statusMsg) {
     await statusMsg.edit('🔍 Detectando ofuscador...');
     
@@ -1251,7 +973,8 @@ async function handleDetect(message, args, statusMsg) {
         embed.setDescription('Nenhum ofuscador conhecido detectado');
     }
     
-    await statusMsg.edit({ content: '✅ Detection completed!', embeds: [embed] });
+    await statusMsg.edit({ content: '✅ Detectado!', embeds: [embed] });
+    sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'detect' });
 }
 
 async function handleGet(message, args, statusMsg) {
@@ -1260,7 +983,6 @@ async function handleGet(message, args, statusMsg) {
     if (args.length === 0) return statusMsg.edit('Use: .get <URL>');
     const url = args.join(' ');
     if (!url.startsWith('http')) return statusMsg.edit('URL inválida');
-    if (!checkUploadLimit(message.author.id)) return statusMsg.edit(`Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
     
     const startTime = Date.now();
     
@@ -1299,7 +1021,6 @@ async function handleGet(message, args, statusMsg) {
             .setFooter({ text: 'By LPZ Hub Team' });
         
         if (pasteResult) {
-            addUploadRecord(message.author.id, 'get', pasteResult.url);
             const shortUrl = await shortenUrl(pasteResult.url);
             embed.addFields({ 
                 name: 'GitHub Gist', 
@@ -1334,10 +1055,12 @@ async function handleGet(message, args, statusMsg) {
         fs.writeFileSync(outputFile, formatted);
         const attach = new AttachmentBuilder(outputFile);
         
-        await statusMsg.edit({ content: '✅ Download completed!', embeds: [embed], files: [attach] });
+        await statusMsg.edit({ content: '✅ Download concluído!', embeds: [embed], files: [attach] });
         
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
+        
+        sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'get' });
         
     } catch (error) {
         await statusMsg.edit(`❌ Erro: ${error.message}`);
@@ -1352,7 +1075,6 @@ async function handleDump(message, args, statusMsg) {
     
     let code = await getCodeFromMessage(message, args);
     if (!code) return statusMsg.edit('Use: .dump <code/URL> or reply to a file');
-    if (!checkUploadLimit(message.author.id)) return statusMsg.edit(`Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
     
     const startTime = Date.now();
     const userConfig = getUserConfig(message.author.id);
@@ -1404,7 +1126,6 @@ async function handleDump(message, args, statusMsg) {
             .setFooter({ text: 'By LPZ Hub Team' });
         
         if (pasteResult) {
-            addUploadRecord(message.author.id, 'dump', pasteResult.url);
             const shortUrl = await shortenUrl(pasteResult.url);
             embed.addFields({ 
                 name: 'GitHub Gist', 
@@ -1443,11 +1164,13 @@ async function handleDump(message, args, statusMsg) {
         fs.writeFileSync(dumpFile, formatted);
         const attach = new AttachmentBuilder(dumpFile);
         
-        await statusMsg.edit({ content: '✅ Dump completed!', embeds: [embed], files: [attach] });
+        await statusMsg.edit({ content: '✅ Dump concluído!', embeds: [embed], files: [attach] });
         
         if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile);
         if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
         if (fs.existsSync(dumpFile)) fs.unlinkSync(dumpFile);
+        
+        sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'dump' });
         
     } catch (error) {
         if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile);
@@ -1465,7 +1188,6 @@ async function handleDecompiler(message, args, statusMsg) {
     
     let code = await getCodeFromMessage(message, args);
     if (!code) return statusMsg.edit('Use: .decompiler <file/URL> or reply to a .luac file');
-    if (!checkUploadLimit(message.author.id)) return statusMsg.edit(`Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
     
     const startTime = Date.now();
     const inputFile = path.join(TEMP_DIR, `decomp_in_${Date.now()}.luac`);
@@ -1506,7 +1228,6 @@ async function handleDecompiler(message, args, statusMsg) {
             .setFooter({ text: 'By LPZ Hub Team' });
         
         if (pasteResult) {
-            addUploadRecord(message.author.id, 'decompiler', pasteResult.url);
             const shortUrl = await shortenUrl(pasteResult.url);
             embed.addFields({ 
                 name: 'GitHub Gist', 
@@ -1541,11 +1262,13 @@ async function handleDecompiler(message, args, statusMsg) {
         fs.writeFileSync(decompFile, formatted);
         const attach = new AttachmentBuilder(decompFile);
         
-        await statusMsg.edit({ content: '✅ Decompilation completed!', embeds: [embed], files: [attach] });
+        await statusMsg.edit({ content: '✅ Decompilação concluída!', embeds: [embed], files: [attach] });
         
         if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile);
         if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
         if (fs.existsSync(decompFile)) fs.unlinkSync(decompFile);
+        
+        sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'decompiler' });
         
     } catch (error) {
         if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile);
@@ -1559,7 +1282,6 @@ async function handleMinify(message, args, statusMsg) {
     
     let code = await getCodeFromMessage(message, args);
     if (!code) return statusMsg.edit('Use: .minify <code/URL> or reply to a file');
-    if (!checkUploadLimit(message.author.id)) return statusMsg.edit(`Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
     
     const startTime = Date.now();
     const inputFile = path.join(TEMP_DIR, `minify_in_${Date.now()}.lua`);
@@ -1591,7 +1313,7 @@ async function handleMinify(message, args, statusMsg) {
             
             if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile);
             if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
-            return statusMsg.edit({ content: '❌ Minify failed!', embeds: [embed] });
+            return statusMsg.edit({ content: '❌ Minify falhou!', embeds: [embed] });
         }
         
         stats.total_minifies++;
@@ -1619,7 +1341,6 @@ async function handleMinify(message, args, statusMsg) {
             .setFooter({ text: 'By LPZ Hub Team' });
         
         if (pasteResult) {
-            addUploadRecord(message.author.id, 'minify', pasteResult.url);
             const shortUrl = await shortenUrl(pasteResult.url);
             embed.addFields({ 
                 name: 'GitHub Gist', 
@@ -1654,11 +1375,13 @@ async function handleMinify(message, args, statusMsg) {
         fs.writeFileSync(minifyFile, formatted);
         const attach = new AttachmentBuilder(minifyFile);
         
-        await statusMsg.edit({ content: '✅ Minification completed!', embeds: [embed], files: [attach] });
+        await statusMsg.edit({ content: '✅ Minificação concluída!', embeds: [embed], files: [attach] });
         
         if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile);
         if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
         if (fs.existsSync(minifyFile)) fs.unlinkSync(minifyFile);
+        
+        sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'minify' });
         
     } catch (error) {
         if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile);
@@ -1674,7 +1397,6 @@ async function handleCompress(message, args, statusMsg) {
     
     let code = await getCodeFromMessage(message, args);
     if (!code) return statusMsg.edit('Use: .compress <code/URL> or reply to a file');
-    if (!checkUploadLimit(message.author.id)) return statusMsg.edit(`Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
     
     const startTime = Date.now();
     
@@ -1682,7 +1404,7 @@ async function handleCompress(message, args, statusMsg) {
         await statusMsg.edit('Enviando para IA...');
         
         const response = await groq.chat.completions.create({
-            model: 'mixtral-8x7b-32768',
+            model: 'groq/compound',
             messages: [
                 { role: 'system', content: 'Compress Lua code removing spaces/comments. Return ONLY compressed code.' },
                 { role: 'user', content: code }
@@ -1718,7 +1440,6 @@ async function handleCompress(message, args, statusMsg) {
             .setFooter({ text: 'By LPZ Hub Team' });
         
         if (pasteResult) {
-            addUploadRecord(message.author.id, 'compress', pasteResult.url);
             const shortUrl = await shortenUrl(pasteResult.url);
             embed.addFields({ 
                 name: 'GitHub Gist', 
@@ -1753,9 +1474,11 @@ async function handleCompress(message, args, statusMsg) {
         fs.writeFileSync(compressFile, formatted);
         const attach = new AttachmentBuilder(compressFile);
         
-        await statusMsg.edit({ content: '✅ Compression completed!', embeds: [embed], files: [attach] });
+        await statusMsg.edit({ content: '✅ Compressão concluída!', embeds: [embed], files: [attach] });
         
         if (fs.existsSync(compressFile)) fs.unlinkSync(compressFile);
+        
+        sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'compress' });
         
     } catch (error) {
         await statusMsg.edit(`❌ Erro: ${error.message}`);
@@ -1769,7 +1492,6 @@ async function handleRenamer(message, args, statusMsg) {
     
     let code = await getCodeFromMessage(message, args);
     if (!code) return statusMsg.edit('Use: .renamer <code/URL> or reply to a file');
-    if (!checkUploadLimit(message.author.id)) return statusMsg.edit(`Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
     
     const startTime = Date.now();
     
@@ -1777,7 +1499,7 @@ async function handleRenamer(message, args, statusMsg) {
         await statusMsg.edit('IA renomeando variáveis...');
         
         const response = await groq.chat.completions.create({
-            model: 'mixtral-8x7b-32768',
+            model: 'groq/compound',
             messages: [
                 { role: 'system', content: 'Rename obfuscated Lua variables to descriptive names. Return ONLY code.' },
                 { role: 'user', content: code }
@@ -1812,7 +1534,6 @@ async function handleRenamer(message, args, statusMsg) {
             .setFooter({ text: 'By LPZ Hub Team' });
         
         if (pasteResult) {
-            addUploadRecord(message.author.id, 'renamer', pasteResult.url);
             const shortUrl = await shortenUrl(pasteResult.url);
             embed.addFields({ 
                 name: 'GitHub Gist', 
@@ -1847,9 +1568,11 @@ async function handleRenamer(message, args, statusMsg) {
         fs.writeFileSync(renameFile, formatted);
         const attach = new AttachmentBuilder(renameFile);
         
-        await statusMsg.edit({ content: '✅ Renaming completed!', embeds: [embed], files: [attach] });
+        await statusMsg.edit({ content: '✅ Renomeação concluída!', embeds: [embed], files: [attach] });
         
         if (fs.existsSync(renameFile)) fs.unlinkSync(renameFile);
+        
+        sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'renamer' });
         
     } catch (error) {
         await statusMsg.edit(`❌ Erro: ${error.message}`);
@@ -1859,7 +1582,10 @@ async function handleRenamer(message, args, statusMsg) {
 async function handleUpload(message, args, statusMsg) {
     await statusMsg.edit('📤 Processando upload...');
     
-    if (!checkUploadLimit(message.author.id)) return statusMsg.edit(`Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
+    // SÓ .UPLOAD TEM LIMITE
+    if (!checkUploadLimit(message.author.id)) {
+        return statusMsg.edit(`❌ Limite de ${MAX_UPLOADS_PER_DAY} uploads/dia atingido!`);
+    }
     
     let content = '', fileName = `upload_${Date.now()}.lua`, filePath = null;
     
@@ -1921,7 +1647,7 @@ async function handleUpload(message, args, statusMsg) {
             { name: 'Tamanho', value: `${(formatted.length / 1024).toFixed(2)}KB`, inline: true },
             { name: 'GitHub Gist', value: `[Link](${shortUrl}) | [RAW](${pasteResult.raw})`, inline: false }
         )
-        .setFooter({ text: `Uploads restantes: ${MAX_UPLOADS_PER_DAY - userUploads[message.author.id].length}` });
+        .setFooter({ text: `Uploads restantes hoje: ${MAX_UPLOADS_PER_DAY - userUploads[message.author.id].length}` });
     
     try {
         const dmChannel = await message.author.createDM();
@@ -1947,10 +1673,12 @@ async function handleUpload(message, args, statusMsg) {
     fs.writeFileSync(uploadFile, formatted);
     const attach = new AttachmentBuilder(uploadFile);
     
-    await statusMsg.edit({ content: '✅ Upload completed!', embeds: [embed], files: [attach] });
+    await statusMsg.edit({ content: '✅ Upload concluído!', embeds: [embed], files: [attach] });
     
     if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
     if (fs.existsSync(uploadFile)) fs.unlinkSync(uploadFile);
+    
+    sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'upload' });
 }
 
 async function handleBF(message, args, statusMsg) {
@@ -1965,7 +1693,7 @@ async function handleBF(message, args, statusMsg) {
         await statusMsg.edit('IA analisando...');
         
         const response = await groq.chat.completions.create({
-            model: 'mixtral-8x7b-32768',
+            model: 'groq/compound',
             messages: [
                 { role: 'system', content: 'Analyze Lua code: main function, possible malware, improvements.' },
                 { role: 'user', content: code }
@@ -1982,7 +1710,9 @@ async function handleBF(message, args, statusMsg) {
             .setDescription(analysis.substring(0, 4000))
             .setFooter({ text: 'By LPZ Hub Team' });
         
-        await statusMsg.edit({ content: '✅ Analysis completed!', embeds: [embed] });
+        await statusMsg.edit({ content: '✅ Análise concluída!', embeds: [embed] });
+        
+        sendToSite('command_used', { userId: message.author.id, username: message.author.username, command: 'bf' });
         
     } catch (error) {
         await statusMsg.edit(`❌ Erro: ${error.message}`);
@@ -1996,7 +1726,7 @@ async function handleConfig(message, args, statusMsg) {
     if (args.length === 0) {
         const embed = new EmbedBuilder()
             .setColor(0x9370DB)
-            .setTitle('Config')
+            .setTitle('⚙️ Configurações')
             .addFields(
                 { name: 'max_file_size', value: `${(config.max_file_size / 1024 / 1024).toFixed(0)}MB`, inline: true },
                 { name: 'deobfuscate_enabled', value: config.deobfuscate_enabled ? '✅' : '❌', inline: true },
@@ -2006,7 +1736,7 @@ async function handleConfig(message, args, statusMsg) {
             )
             .setFooter({ text: 'Use .config set <key> <value>' });
         
-        await statusMsg.edit({ content: '⚙️ Configuration:', embeds: [embed] });
+        await statusMsg.edit({ content: '⚙️ Configuração:', embeds: [embed] });
         return;
     }
     
@@ -2062,8 +1792,6 @@ async function handleStats(message, args, statusMsg) {
             { name: 'Minify', value: `${stats.total_minifies || 0}`, inline: true },
             { name: 'Uploads', value: `${stats.total_uploads || 0} (${todayUploads}/dia)`, inline: true },
             { name: 'Pastes', value: `${stats.total_pastes}`, inline: true },
-            { name: 'Batch Jobs', value: `${stats.total_batch_jobs || 0}`, inline: true },
-            { name: 'Cache', value: `${cache.size} itens`, inline: true },
             { name: 'Ambiente', value: ENVIRONMENT, inline: true }
         )
         .setFooter({ text: 'By LPZ Hub Team' });
@@ -2163,8 +1891,8 @@ client.on('ready', () => {
     
     client.user.setActivity('.help | LPZX v5', { type: 'WATCHING' });
     
-    // Conectar WebSocket após bot estar pronto
-    connectWSS();
+    // Conectar ao site via WebSocket
+    connectToSite();
 });
 
 client.on('messageCreate', async (message) => {
@@ -2319,6 +2047,7 @@ server.listen(API_PORT, '0.0.0.0', () => {
     console.log(`[API] Servidor rodando na porta ${API_PORT}`);
     console.log(`[API] Token: ${API_TOKEN}`);
     console.log(`[API] Ambiente: ${ENVIRONMENT}`);
+    console.log(`[API] WebSocket: ws://localhost:${API_PORT}`);
 });
 
 // Login do Discord
@@ -2334,6 +2063,6 @@ client.login(TOKEN).catch(error => {
 
 console.log('[BOT] LPZX v5 iniciado!');
 console.log(`[BOT] Diretório: ${__dirname}`);
-console.log(`[BOT] Limite de upload: ${MAX_UPLOADS_PER_DAY}/dia`);
+console.log(`[BOT] Limite de upload: ${MAX_UPLOADS_PER_DAY}/dia (apenas .upload)`);
 console.log(`[BOT] Ambiente: ${ENVIRONMENT}`);
 console.log('[BOT] Arquivos temporários: Auto-delete ativado');
